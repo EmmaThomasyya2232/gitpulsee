@@ -1,5 +1,11 @@
 # GitPulse · 分布式开发者活跃度与项目关注调度系统
 
+![CI](https://img.shields.io/badge/CI-tests_32%2F32-brightgreen)
+![平台](https://img.shields.io/badge/platform-Cloudflare_Workers%20%2B%20D1-orange)
+![依赖](https://img.shields.io/badge/deps-零第三方业务依赖-blue)
+![Node](https://img.shields.io/badge/node-%E2%89%A518-green)
+![许可](https://img.shields.io/badge/license-MIT-lightgrey)
+
 > 基于 Cloudflare Workers + D1 架构的高拟真、去规律化开发者活跃度管理系统。
 > 纯原生 Web Crypto 驱动 2FA 算号与会话签名，支持多身份凭据托管、分时区作息模型、
 > 主页日常学习动态同步与平滑分布式关注计划（Campaign）。
@@ -83,7 +89,8 @@
 gitpulse/                         # 工程即 GitPulse
 ├── wrangler.toml                # Worker + D1(DB) + Cron(*/30) + nodejs_compat
 ├── migrations/0001_init.sql    # D1 建表 + 种子文案
-│   └── 0002_add_retry.sql    # 队列重试计数（指数退避）
+│   ├── 0002_add_retry.sql    # 队列重试计数（指数退避）
+│   └── 0003_admin_audit.sql  # 管理员操作审计表
 ├── src/
 │   ├── index.js                # 路由入口 + API + scheduled 调度器
 │   ├── crypto.js               # AES-GCM / PBKDF2-200k / HMAC-SHA256 / base64url
@@ -96,6 +103,7 @@ gitpulse/                         # 工程即 GitPulse
 │   ├── selftest.mjs            # 本地自测（32 项）
 │   └── check_html.mjs          # 控制台内嵌 JS 语法校验
 ├── docs/项目计划.md            # 项目计划文档
+├── CHANGELOG.md                 # 更新日志（Keep a Changelog 格式）
 ├── README.md / LICENSE         # 本文件 / MIT
 └── package.json
 ```
