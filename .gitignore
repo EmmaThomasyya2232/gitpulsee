@@ -1,0 +1,11 @@
+node_modules/
+.wrangler/
+dist/
+.dev.vars
+*.pem
+.env
+
+# 本地生成/预览文件
+.observability/
+preview.html
+scripts/preview-app.js

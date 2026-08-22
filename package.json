@@ -1,0 +1,19 @@
+{
+  "name": "gitpulse",
+  "version": "1.0.0",
+  "description": "GitPulse · 分布式开发者活跃度与项目关注调度系统 (Cloudflare Workers + D1)",
+  "type": "module",
+  "scripts": {
+    "db:create": "wrangler d1 create gitpulse_db",
+    "db:migrate": "wrangler d1 migrations apply DB --local && wrangler d1 migrations apply DB",
+    "dev": "wrangler dev --local --persist",
+    "deploy": "wrangler deploy",
+    "test": "node scripts/selftest.mjs",
+    "check-html": "node scripts/check_html.mjs && node --check scripts/preview-app.js",
+    "init": "npm run db:migrate && npm run deploy"
+  },
+  "devDependencies": {
+    "wrangler": "^3.114.1"
+  },
+  "license": "MIT"
+}

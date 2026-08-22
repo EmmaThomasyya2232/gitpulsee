@@ -1,0 +1,28 @@
+# ============================================================
+# gitpulse —— 分布式开发者活跃度与项目分布式关注调度系统
+# Cloudflare Workers + D1
+# ============================================================
+name = "gitpulse"
+main = "src/index.js"
+compatibility_date = "2025-06-01"
+
+# 需要开启实验: 浏览器 + nodejs_compat 以便使用 Buffer/TextEncoder
+compatibility_flags = ["nodejs_compat"]
+
+# D1 数据库绑定
+[[d1_databases]]
+binding = "DB"                    # 代码内使用的绑定名
+database_name = "gitpulse_db"
+database_id = "REPLACE_WITH_DATABASE_ID"   # 在部署前用 wrangler d1 create 生成
+
+# 定时调度：每 30 分钟触发一次执行（处理到期任务、补充活跃计划）
+[triggers]
+crons = ["*/30 * * * *"]
+
+[vars]
+APP_NAME = "gitpulse"
+# 可选：mode=ai 账号的 LLM 日常文案生成（OpenAI 兼容接口）。
+# 不配置时 mode=ai 自动回退到动作池文案，功能不受影响。
+# 密钥不要写在这里，用: npx wrangler secret put LLM_API_KEY
+# LLM_BASE_URL = "https://api.openai.com/v1"   # 任意 OpenAI 兼容端点
+# LLM_MODEL = "gpt-4o-mini"

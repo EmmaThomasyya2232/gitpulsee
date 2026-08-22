@@ -1,0 +1,38 @@
+# GitPulse 自测流水线：每次 push / PR 自动运行
+# - node --check 全部源码
+# - 本地自测（selftest.mjs，当前 32 项）
+# - 控制台内嵌 JS 语法校验（check_html.mjs）
+name: selftest
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - run: npm install --ignore-scripts
+
+      - name: Syntax check (src)
+        run: |
+          set -e
+          for f in src/crypto.js src/totp.js src/auth.js src/audit.js src/ai.js src/github.js src/orchestrator.js src/index.js src/console.js; do
+            node --check "$f"
+          done
+
+      - name: Selftest
+        run: npm test
+
+      - name: Inline HTML JS check
+        run: |
+          node scripts/check_html.mjs && node --check scripts/preview-app.js
