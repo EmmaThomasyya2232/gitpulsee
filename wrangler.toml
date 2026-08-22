@@ -13,10 +13,10 @@ compatibility_flags = ["nodejs_compat"]
 [[d1_databases]]
 binding = "DB"                    # 代码内使用的绑定名
 database_name = "gitpulse_db"
-# 一键部署（Deploy to Cloudflare 按钮）会自动创建数据库并填充 database_id；
+# 一键部署（Deploy to Cloudflare 按钮）会自动创建数据库并把真实 id 写入下面字段；
 # 手动 CLI 部署时，请先运行 npx wrangler d1 create gitpulse_db，
-# 然后把返回的 id 填到下面这一行：
-# database_id = "REPLACE_WITH_DATABASE_ID"
+# 然后把返回的 id 替换下面的占位符：
+database_id = "REPLACE_WITH_DATABASE_ID"
 
 # 定时调度：每 30 分钟触发一次执行（处理到期任务、补充活跃计划）
 [triggers]
