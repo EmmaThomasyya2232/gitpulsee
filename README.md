@@ -93,7 +93,8 @@ gitpulse/                         # 工程即 GitPulse
 ├── migrations/0001_init.sql    # D1 建表 + 种子文案
 │   ├── 0002_add_retry.sql    # 队列重试计数（指数退避）
 │   ├── 0003_admin_audit.sql  # 管理员操作审计表
-│   └── 0004_webauth.sql      # Web 会话层：gh_password_enc / gh_totp_enc / auth_state / last_probe_at
+│   ├── 0004_webauth.sql      # Web 会话层：gh_password_enc / gh_totp_enc / auth_state / last_probe_at
+│   └── 0005_add_gh_login.sql # 补充 accounts.gh_login（GitHub 登录名）
 ├── src/
 │   ├── index.js                # 路由入口 + API + scheduled 调度器
 │   ├── crypto.js               # AES-GCM / PBKDF2-200k / HMAC-SHA256 / base64url
