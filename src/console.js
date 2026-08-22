@@ -174,7 +174,8 @@ function switchView(v) {
 function refresh() {
   var fn = { overview: renderOverview, accounts: renderAccounts, campaigns: renderCampaigns,
     queue: renderQueue, pools: renderPools, logs: renderLogs }[state.view] || renderOverview;
-  }
+  fn();
+}
 
 // ---------- 渲染 ----------
 function panel(title, inner) {
