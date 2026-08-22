@@ -1,6 +1,7 @@
 # GitPulse · 分布式开发者活跃度与项目关注调度系统
 
 [![CI](https://github.com/EmmaThomasyya2232/gitpulse/actions/workflows/test.yml/badge.svg)](https://github.com/EmmaThomasyya2232/gitpulse/actions/workflows/test.yml)
+[![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/EmmaThomasyya2232/gitpulse)
 ![平台](https://img.shields.io/badge/platform-Cloudflare_Workers%20%2B%20D1-orange)
 ![依赖](https://img.shields.io/badge/deps-零第三方业务依赖-blue)
 ![Node](https://img.shields.io/badge/node-%E2%89%A518-green)
@@ -115,6 +116,21 @@ gitpulse/                         # 工程即 GitPulse
 ---
 
 ## 🚀 快速开始
+
+### 方式一：一键部署（推荐，全自动）⚡
+
+点击上面的 **Deploy to Cloudflare** 按钮，或直接打开：
+<https://deploy.workers.cloudflare.com/?url=https://github.com/EmmaThomasyya2232/gitpulse>
+
+登录 Cloudflare 后向导会自动完成：
+1. 克隆本仓库到你的 GitHub 账号
+2. 自动创建 D1 数据库并绑定
+3. 提示你填写 `MASTER_ENCRYPT_SECRET`（必填，用 `openssl rand -hex 32` 生成；其余可留空）
+4. 自动执行数据库迁移并部署 Worker
+
+完成后打开分配的 `*.workers.dev` 域名即可初始化管理员。
+
+### 方式二：CLI 手动部署
 
 ### 1. 准备
 - Node.js ≥ 18、Wrangler CLI、Cloudflare 账户（免费版即可）。
