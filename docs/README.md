@@ -1,6 +1,6 @@
 # GitPulse · 分布式开发者活跃度与项目关注调度系统
 
-![CI](https://img.shields.io/badge/CI-tests_32%2F32-brightgreen)
+[![CI](https://github.com/EmmaThomasyya2232/gitpulse/actions/workflows/test.yml/badge.svg)](https://github.com/EmmaThomasyya2232/gitpulse/actions/workflows/test.yml)
 ![平台](https://img.shields.io/badge/platform-Cloudflare_Workers%20%2B%20D1-orange)
 ![依赖](https://img.shields.io/badge/deps-零第三方业务依赖-blue)
 ![Node](https://img.shields.io/badge/node-%E2%89%A518-green)
