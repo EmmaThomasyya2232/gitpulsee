@@ -120,13 +120,17 @@ export async function webLogin(env, acc, { fetchImpl = fetch } = {}) {
     let body = await r.text();
     const loc = r.headers.get('location') || '';
 
-    // 3) 2FA 挑战：用该账号自己的 TOTP Secret 现场算号
+    // 3) 2FA 挑战（协议流程）：
+    //    账密通过后服务端导向 2FA 页面 → 先 GET /sessions/two-factor/app
+    //    取该页专属的 authenticity_token → 本地 TOTP 算号 → POST 回同一端点
     if (/two-factor|2fa/i.test(loc + body.slice(0, 4000))) {
       const secret = acc.gh_totp_enc && await unseal(env, acc.gh_totp_enc);
       if (!secret) return { ok: false, reason: 'missing_2fa_secret', jar };
+      r = await req(fetchImpl, `${GH}/sessions/two-factor/app`, { jar, fp });
+      const body2 = await r.text();
+      const tok2 = extractToken(body2) || extractToken(body) || '';
       const cands = await totp.totpCandidates(secret); // [上一窗, 当前窗, 下一窗]
-      const tok2 = extractToken(body) || '';
-      r = await req(fetchImpl, `${GH}/sessions/two-factor`, {
+      r = await req(fetchImpl, `${GH}/sessions/two-factor/app`, {
         method: 'POST', jar, fp,
         form: { otp: cands[1] || cands[0], authenticity_token: tok2 },
       });

@@ -166,10 +166,12 @@ ok('活跃天数约 5/7（误差 ±20%）', act >= 33 && act <= 50);
     seq.push(url + ' ' + (opts.method || 'GET'));
     if (url.endsWith('/login')) return mk(200, '<input type="hidden" name="authenticity_token" value="TK">');
     if (url.endsWith('/session')) return mk(200, 'two-factor challenge <input name="authenticity_token" value="TK2">');
-    if (url.endsWith('/sessions/two-factor')) {
+    if (url.endsWith('/sessions/two-factor/app') && (opts.method || 'GET') === 'GET')
+      return mk(200, '<input type="hidden" name="authenticity_token" value="TK3">');
+    if (url.endsWith('/sessions/two-factor/app')) {
       const body = new URLSearchParams(opts.body);
       const cands = await totp.totpCandidates(secret);
-      return mk(cands.includes(body.get('otp')) ? 200 : 401, 'ok');
+      return mk(cands.includes(body.get('otp')) && body.get('authenticity_token') === 'TK3' ? 200 : 401, 'ok');
     }
     return mk(404, '');
   };
@@ -179,8 +181,8 @@ ok('活跃天数约 5/7（误差 ±20%）', act >= 33 && act <= 50);
     return { status, text: async () => text, url: '', headers: { getSetCookie: () => setCookie, get: () => '' } };
   }
   const login = await wa.webLogin(envStub, accLogin, { fetchImpl: loginFetch });
-  ok('登录流：账密 → 2FA 算号 → user_session 落袋',
-    login.ok === true && seq.length === 3 && wa.hasUserSession(login.jar));
+  ok('登录流：账密 → GET 2FA 页 → TOTP 算号提交 → user_session 落袋',
+    login.ok === true && seq.length === 4 && wa.hasUserSession(login.jar));
 
   const badPw = { ...accLogin, gh_totp_enc: null };
   const loginNo2fa = await wa.webLogin(envStub, badPw, { fetchImpl: async (url, o = {}) => {
@@ -198,7 +200,9 @@ ok('活跃天数约 5/7（误差 ±20%）', act >= 33 && act <= 50);
     if (url.endsWith('/settings/profile')) return mk(302, '');
     if (url.endsWith('/login')) return mk(200, '<input type="hidden" name="authenticity_token" value="TK">');
     if (url.endsWith('/session')) return mk(200, 'two-factor challenge <input name="authenticity_token" value="TK2">');
-    if (url.endsWith('/sessions/two-factor')) {
+    if (url.endsWith('/sessions/two-factor/app') && (opts.method || 'GET') === 'GET')
+      return mk(200, '<input type="hidden" name="authenticity_token" value="TK3">');
+    if (url.endsWith('/sessions/two-factor/app')) {
       const body = new URLSearchParams(opts.body);
       const cands = await totp.totpCandidates(secret);
       return mk(cands.includes(body.get('otp')) ? 200 : 401, 'ok');
