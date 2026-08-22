@@ -241,13 +241,16 @@ async function status(env) {
 }
 
 // ---------- 路由 ----------
-export default {
-  async fetch(req, env) {
+async function handleRequest(req, env) {
     const url = new URL(req.url);
     const path = url.pathname;
 
     if (req.method === 'GET' && (path === '/' || path === '/console')) {
       return new Response(consoleHTML, { headers: { 'Content-Type': 'text/html; charset=utf-8' } });
+    }
+    if (req.method === 'GET' && path === '/favicon.ico') {
+      const svg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><text y="82" font-size="80">📈</text></svg>';
+      return new Response(svg, { headers: { 'Content-Type': 'image/svg+xml', 'Cache-Control': 'public, max-age=86400' } });
     }
     if (req.method === 'GET' && path === '/api/status') return status(env);
     if (req.method === 'POST' && path === '/api/auth/setup') return setup(req, env);
@@ -294,8 +297,18 @@ export default {
       await audit.logAdmin(env.DB, { accountId, action: act, detail: `${req.method} ${path}`, ip: audit.clientIp(req) });
     }
     return resp;
-  },
+}
 
+// 全局异常兜底：任何未捕获错误都返回 JSON（便于控制台排查），而不是 Cloudflare HTML 错误页
+export default {
+  async fetch(req, env) {
+    try {
+      return await handleRequest(req, env);
+    } catch (e) {
+      console.error('unhandled error:', e && (e.stack || e.message || e));
+      return err(`服务器内部错误: ${String((e && e.message) || e)}`, 500);
+    }
+  },
   async scheduled(event, env) {
     try { await orc.runCycle(env); } catch (e) { console.error('scheduled error', e); }
   },

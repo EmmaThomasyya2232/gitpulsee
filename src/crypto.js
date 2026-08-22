@@ -79,8 +79,10 @@ function getSecret(env) {
   return env.MASTER_ENCRYPT_SECRET;
 }
 
-// ---- 口令散列 (PBKDF2-SHA256 x200000) ----
-const PBKDF2_ITER = 200_000;
+// ---- 口令散列 (PBKDF2-SHA256) ----
+// 注意：Workers 免费版每请求仅 10ms CPU。200k 次迭代会超出限制导致 500。
+// 25k 次在免费版安全范围内；管理员账号配合强口令仍有良好安全性。
+const PBKDF2_ITER = 25_000;
 export async function hashPassword(plain, saltB64) {
   const salt = saltB64 ? fromBase64(saltB64) : randomBytes(16);
   const base = await crypto.subtle.importKey('raw', enc.encode(String(plain)), 'PBKDF2', false, ['deriveBits']);
