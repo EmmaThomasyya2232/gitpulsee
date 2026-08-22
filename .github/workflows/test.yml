@@ -19,9 +19,9 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 20
-          cache: npm
+          # 零依赖项目，无 package-lock.json，不启用 npm cache
 
-      - run: npm install --ignore-scripts
+      # 无第三方依赖，无需 npm install
 
       - name: Syntax check (src)
         run: |
