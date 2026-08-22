@@ -6,6 +6,7 @@ import { consoleHTML } from './console.js';
 import { seal, unseal, hashPassword, verifyPassword } from './crypto.js';
 import * as totp from './totp.js';
 import * as authM from './auth.js';
+import * as wa from './webauth.js';
 import * as orc from './orchestrator.js';
 import * as audit from './audit.js';
 
@@ -103,12 +104,18 @@ async function me(req, env, accountId) {
   return ok({ user: pub });
 }
 
+const A_cols = 'id,username,status,mode,ai_persona,note_repo,timezone,weekly_active_days,rest_until,last_action_at,created_at,gh_login,auth_state,last_probe_at,fingerprint';
+
 async function listAccounts(env) {
-  const { results } = await env.DB.prepare(
-    'SELECT id,username,status,mode,ai_persona,note_repo,timezone,weekly_active_days,rest_until,last_action_at,created_at FROM accounts ORDER BY created_at'
-  ).all();
-  return ok({ accounts: results || [] });
+  const { results } = await env.DB.prepare(`SELECT ${A_cols} FROM accounts ORDER BY created_at`).all();
+  // 附带指纹短标签，便于控制台直接展示
+  const accounts = (results || []).map((a) => ({
+    ...a,
+    fingerprint_label: a.fingerprint ? (safeJson(a.fingerprint).label || '') : '',
+  }));
+  return ok({ accounts });
 }
+function safeJson(s) { try { return JSON.parse(s) || {}; } catch { return {}; } }
 
 async function createAccount(req, env) {
   const body = await req.json().catch(() => ({}));
@@ -116,20 +123,31 @@ async function createAccount(req, env) {
   if (!username) return err('username 必填');
   const exists = await env.DB.prepare('SELECT id FROM accounts WHERE username = ? COLLATE NOCASE').bind(username).first();
   if (exists) return err('账号已存在');
+  // Web 会话通道：必须提供 GitHub 登录密码（2FA 可选但强烈建议）
+  if (!body.gh_password) return err('gh_password 必填（GitHub 登录密码，用于会话自愈）');
   const id = crypto.randomUUID();
-  const tSecret = totp.randomSecret();
-  const encToken = body.github_token ? await seal(env, String(body.github_token).trim()) : null;
+  const tSecret = totp.randomSecret();          // 控制台登录用 TOTP
+  const ghTotp = body.gh_totp ? String(body.gh_totp).trim().toUpperCase().replace(/\s/g, '') : null;
+  const fp = wa.makeFingerprint(id);            // 一号一固化指纹，全生命周期不变
   const passwordHash = body.password ? await hashPassword(String(body.password)) : null;
   await env.DB.prepare(
     `INSERT INTO accounts
-      (id, username, password_hash, totp_secret_enc, github_token_enc, status, mode, ai_persona, note_repo, timezone, weekly_active_days, rest_until)
-     VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`
+      (id, username, password_hash, totp_secret_enc, status, mode, ai_persona, note_repo, timezone, weekly_active_days, rest_until,
+       gh_login, gh_password_enc, gh_totp_enc, fingerprint, auth_state, cookie_jar)
+     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'{}')`
   ).bind(
-    id, username, passwordHash, await seal(env, tSecret), encToken,
+    id, username, passwordHash, await seal(env, tSecret),
     'active', body.mode || 'rule', body.ai_persona || null, body.note_repo || null,
-    body.timezone || '+08:00', Number(body.weekly_active_days || 5), body.rest_until || null
+    body.timezone || '+08:00', Number(body.weekly_active_days || 5), body.rest_until || null,
+    body.gh_login || username, await seal(env, String(body.gh_password)),
+    ghTotp ? await seal(env, ghTotp) : null,
+    JSON.stringify(fp), 'unverified'
   ).run();
-  return ok({ id, username, otpauth: totp.otpauthUrl(username, tSecret), tip: 'otpauth 仅显示这一次，请立即保存' });
+  return ok({
+    id, username, fingerprint_label: fp.label,
+    otpauth: totp.otpauthUrl(username, tSecret),
+    tip: 'otpauth 仅显示这一次，请立即保存；账号将在首次执行任务时自动完成 Web 登录并固化会话',
+  });
 }
 
 async function updateAccount(req, env, url) {
@@ -142,15 +160,38 @@ async function updateAccount(req, env, url) {
       fields.push(`${k} = ?`);
       vals.push(v);
     }
-    if (k === 'github_token' && v) {
-      fields.push('github_token_enc = ?');
-      vals.push(await seal(env, String(v).trim()));
+    if (k === 'gh_password' && v) {
+      fields.push('gh_password_enc = ?');
+      vals.push(await seal(env, String(v)));
+      fields.push("auth_state = 'unverified'", "cookie_jar = '{}'"); // 凭据变更 → 旧会话作废
+    }
+    if (k === 'gh_totp' && v) {
+      fields.push('gh_totp_enc = ?');
+      vals.push(await seal(env, String(v).trim().toUpperCase().replace(/\s/g, '')));
     }
   }
   if (!fields.length) return err('没有可更新的字段');
   vals.push(accountId);
   await env.DB.prepare(`UPDATE accounts SET ${fields.join(', ')} WHERE id = ?`).bind(...vals).run();
   return ok({ updated: accountId });
+}
+
+/** 一键检测：Cookie 探测，失效自动走自愈重登 */
+async function checkAccount(req, env, url) {
+  const id = url.pathname.split('/')[3];
+  const acc = await env.DB.prepare('SELECT * FROM accounts WHERE id = ?').bind(id).first();
+  if (!acc) return err('账号不存在', 404);
+  const sess = await wa.ensureSession(env, acc);
+  return ok({ state: sess ? 'valid' : 'invalid', detail: sess ? 'Cookie 有效' : '自愈失败，已熔断暂停' });
+}
+
+/** 强制重新认证：忽略现有 Cookie，直接走完整 Web 登录 */
+async function reauthAccount(req, env, url) {
+  const id = url.pathname.split('/')[3];
+  const acc = await env.DB.prepare('SELECT * FROM accounts WHERE id = ?').bind(id).first();
+  if (!acc) return err('账号不存在', 404);
+  const sess = await wa.ensureSession(env, acc, { force: true });
+  return ok({ state: sess ? 'valid' : 'invalid', detail: sess ? '重新登录成功，会话已更新' : '重新认证失败，已熔断暂停' });
 }
 
 async function removeAccount(env, url) {
@@ -271,6 +312,8 @@ async function handleRequest(req, env) {
       if (req.method === 'GET' && path === '/api/auth/me') resp = await me(req, env, accountId);
       else if (req.method === 'GET' && path === '/api/accounts') resp = await listAccounts(env);
       else if (req.method === 'POST' && path === '/api/accounts') resp = await createAccount(req, env);
+      else if (req.method === 'POST' && /^\/api\/accounts\/[^/]+\/check$/.test(path)) resp = await checkAccount(req, env, url);
+      else if (req.method === 'POST' && /^\/api\/accounts\/[^/]+\/reauth$/.test(path)) resp = await reauthAccount(req, env, url);
       else if (req.method === 'PUT' && path.startsWith('/api/accounts/')) resp = await updateAccount(req, env, url);
       else if (req.method === 'DELETE' && path.startsWith('/api/accounts/')) resp = await removeAccount(env, url);
       else if (req.method === 'GET' && path === '/api/campaigns') resp = await listCampaigns(env);

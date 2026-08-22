@@ -6,6 +6,7 @@ import * as authM from '../src/auth.js';
 import { plannedAt, offsetMinutes, isActiveDay, expRand, naturalMinute, nextNaturalMinute, retryDelayMs, shouldRetry, isPermanentError } from '../src/orchestrator.js';
 import { clipDetail, clientIp } from '../src/audit.js';
 import { buildPrompt, sanitizeNote, generateNote } from '../src/ai.js';
+import * as wa from '../src/webauth.js';
 
 let pass = 0;
 let fail = 0;
@@ -96,7 +97,7 @@ ok('活跃天数约 5/7（误差 ±20%）', act >= 33 && act <= 50);
   ok('shouldRetry 边界（max=3: 0→重试, 3→放弃）', shouldRetry(0) && shouldRetry(2) && !shouldRetry(3));
   ok('isPermanentError: 401/403 永久失败', isPermanentError(401) && isPermanentError(403) && isPermanentError('x', 403));
   ok('isPermanentError: 可重试错误（429/500/网络异常）', !isPermanentError(429) && !isPermanentError(500) && !isPermanentError('network timeout'));
-  ok('isPermanentError: 配置类错误永久', isPermanentError('no_github_token') && isPermanentError('unknown_action'));
+  ok('isPermanentError: 配置类错误永久', isPermanentError('no_gh_credentials') && isPermanentError('auth_failed_circuit_break') && isPermanentError('unknown_action'));
 }
 
 // 11) 管理审计工具函数
@@ -125,6 +126,93 @@ ok('活跃天数约 5/7（误差 ±20%）', act >= 33 && act <= 50);
   ok('generateNote: 未配置 LLM_API_KEY 时回退动作池', r1.source === 'pool' && r1.content === '池子文案');
   const r2 = await generateNote({ LLM_API_KEY: 'k' }, { mode: 'rule' }, fakeDb);
   ok('generateNote: mode=rule 不触发 LLM 调用', r2.source === 'pool');
+}
+
+// 13) Web 会话层：固化指纹 / CookieJar / 探测 / 登录流 / 静默自愈
+{
+  const f1 = wa.makeFingerprint('account-aaa');
+  const f2 = wa.makeFingerprint('account-aaa');
+  const f3 = wa.makeFingerprint('account-bbb');
+  ok('指纹：同 id 确定性一致，不同 id 环境互异',
+    JSON.stringify(f1) === JSON.stringify(f2) && f1.user_agent !== f3.user_agent);
+  ok('指纹头：UA / Client Hints / 语言齐全',
+    Boolean(f1.user_agent) && f1.sec_ch_ua.includes('Chromium') && Boolean(f1.accept_language));
+
+  const jar = wa.newJar();
+  const fakeResp = (setCookies) => ({ headers: { getSetCookie: () => setCookies, get: () => setCookies.join(', ') }, status: 200, text: async () => '', url: '' });
+  wa.applySetCookies(jar, fakeResp(['user_session=abc123; Path=/; HttpOnly', 'logged_in=yes; Path=/']));
+  ok('CookieJar：解析 Set-Cookie 并合并', jar.user_session === 'abc123' && jar.logged_in === 'yes');
+  ok('CookieJar：cookieHeader 附着与 hasUserSession 判定',
+    wa.cookieHeader(jar) === 'user_session=abc123; logged_in=yes' && wa.hasUserSession(jar));
+
+  const html = '<form action="/session"><input type="hidden" name="authenticity_token" value="TOK123"></form>';
+  ok('表单解析：提取 authenticity_token', wa.extractToken(html) === 'TOK123' && wa.extractToken('<div/>') === null);
+
+  // 探测：200 → 存活；302 → 失效
+  const accProbe = { id: 'p1', fingerprint: JSON.stringify(f1), cookie_jar: JSON.stringify({ user_session: 'x' }) };
+  const alive = await wa.probeSession(accProbe, { fetchImpl: async () => ({ status: 200, url: 'https://github.com/settings/profile', headers: { getSetCookie: () => [], get: () => '' }, text: async () => '' }) });
+  const dead = await wa.probeSession(accProbe, { fetchImpl: async () => ({ status: 302, url: 'https://github.com/login', headers: { getSetCookie: () => [], get: () => '' }, text: async () => '' }) });
+  ok('探测状态机：200 存活 / 302 失效', alive.alive === true && dead.alive === false);
+
+  // 登录流（mock）：账密 → 2FA → user_session
+  const secret = totp.randomSecret();
+  const envStub = { MASTER_ENCRYPT_SECRET: 'k'.repeat(40) };
+  const accLogin = {
+    id: 'l1', gh_login: 'octo', gh_totp_enc: await seal(envStub, secret),
+    gh_password_enc: await seal(envStub, 'hunter22'), fingerprint: JSON.stringify(f1),
+  };
+  const seq = [];
+  const loginFetch = async (url, opts = {}) => {
+    seq.push(url + ' ' + (opts.method || 'GET'));
+    if (url.endsWith('/login')) return mk(200, '<input type="hidden" name="authenticity_token" value="TK">');
+    if (url.endsWith('/session')) return mk(200, 'two-factor challenge <input name="authenticity_token" value="TK2">');
+    if (url.endsWith('/sessions/two-factor')) {
+      const body = new URLSearchParams(opts.body);
+      const cands = await totp.totpCandidates(secret);
+      return mk(cands.includes(body.get('otp')) ? 200 : 401, 'ok');
+    }
+    return mk(404, '');
+  };
+  function mk(status, text) {
+    // 精确匹配 'ok'（不能用 includes，否则 "authenticity_tOKen" 里的 ok 会误触发假 session）
+    const setCookie = (text === 'ok' && status === 200) ? ['user_session=s1; Path=/'] : [];
+    return { status, text: async () => text, url: '', headers: { getSetCookie: () => setCookie, get: () => '' } };
+  }
+  const login = await wa.webLogin(envStub, accLogin, { fetchImpl: loginFetch });
+  ok('登录流：账密 → 2FA 算号 → user_session 落袋',
+    login.ok === true && seq.length === 3 && wa.hasUserSession(login.jar));
+
+  const badPw = { ...accLogin, gh_totp_enc: null };
+  const loginNo2fa = await wa.webLogin(envStub, badPw, { fetchImpl: async (url, o = {}) => {
+    if (url.endsWith('/login')) return mk(200, '<input type="hidden" name="authenticity_token" value="TK">');
+    if (url.endsWith('/session')) return mk(200, 'Incorrect credentials.');
+    return mk(404, '');
+  } });
+  ok('登录流：密码错误分类为 bad_credentials', loginNo2fa.ok === false && loginNo2fa.reason === 'bad_credentials');
+
+  // 静默自愈状态机：Cookie 失效 → 重登成功 → 回写 valid；自愈失败 → 熔断 invalid
+  const updates = [];
+  const dbStub = { prepare: (sql) => ({ bind: (...v) => ({ run: async () => { updates.push([sql.slice(0, 40), v]); } }) }) };
+  // URL 感知 mock：探测页 302 → 登录页带 token → 账密触发 2FA → 算号成功下发 session
+  const healFetch = async (url, opts = {}) => {
+    if (url.endsWith('/settings/profile')) return mk(302, '');
+    if (url.endsWith('/login')) return mk(200, '<input type="hidden" name="authenticity_token" value="TK">');
+    if (url.endsWith('/session')) return mk(200, 'two-factor challenge <input name="authenticity_token" value="TK2">');
+    if (url.endsWith('/sessions/two-factor')) {
+      const body = new URLSearchParams(opts.body);
+      const cands = await totp.totpCandidates(secret);
+      return mk(cands.includes(body.get('otp')) ? 200 : 401, 'ok');
+    }
+    return mk(404, '');
+  };
+  const deadAcc = { ...accLogin, id: 'h1', cookie_jar: JSON.stringify({ user_session: 'stale' }), status: 'active' };
+  const healed = await wa.ensureSession({ DB: dbStub, MASTER_ENCRYPT_SECRET: envStub.MASTER_ENCRYPT_SECRET }, deadAcc, { fetchImpl: healFetch });
+  ok('自愈：探测失效 → 静默重登成功 → 会话回写', Boolean(healed) && updates.some(([s]) => s.includes('cookie_jar')));
+  const noCredAcc = { id: 'h2', cookie_jar: '', gh_password_enc: null, fingerprint: JSON.stringify(f1) };
+  const broken = await wa.ensureSession({ DB: dbStub, MASTER_ENCRYPT_SECRET: envStub.MASTER_ENCRYPT_SECRET }, noCredAcc, {
+    fetchImpl: async (url) => (url.endsWith('/login') ? mk(200, '<input type="hidden" name="authenticity_token" value="TK">') : mk(302, '')),
+  });
+  ok('自愈：无法重登 → 熔断（返回 null 且状态置 invalid）', broken === null && updates.some(([, v]) => v.includes('invalid')));
 }
 
 console.log(`\n结果: ${pass} 通过, ${fail} 失败`);

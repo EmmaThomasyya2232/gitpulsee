@@ -215,11 +215,25 @@ function accHtml(acc) {
   var actBtn = acc.status === 'active'
     ? '<button class="btn btn-ghost" data-action="set-status" data-id="' + acc.id + '" data-val="paused">暂停</button>'
     : '<button class="btn btn-ghost" data-action="set-status" data-id="' + acc.id + '" data-val="active">启用</button>';
+  // 会话认证状态徽章：Cookie有效 / 休眠中 / 需重新认证 / 未验证
+  var auth = acc.auth_state || 'unverified';
+  var authBadge = auth === 'valid'
+    ? '<span class="text-[11px] px-1.5 py-0.5 rounded bg-emerald-900/60 text-emerald-300">Cookie有效</span>'
+    : (acc.rest_until && acc.rest_until >= new Date().toISOString().slice(0, 10))
+      ? '<span class="text-[11px] px-1.5 py-0.5 rounded bg-slate-700 text-slate-300">休眠中</span>'
+      : auth === 'invalid'
+        ? '<span class="text-[11px] px-1.5 py-0.5 rounded bg-rose-900/60 text-rose-300">需重新认证</span>'
+        : '<span class="text-[11px] px-1.5 py-0.5 rounded bg-amber-900/60 text-amber-300">未验证</span>';
+  var fpBtn = '<button class="btn btn-ghost ml-1" data-action="check-acc" data-id="' + acc.id + '">检测</button>' +
+    '<button class="btn btn-ghost ml-1" data-action="reauth-acc" data-id="' + acc.id + '">重认证</button>';
   return '<td>' + esc(acc.username) + ' ' + (acc.note_repo ? ghLink(acc.note_repo) : '') + '</td>' +
-    '<td>' + bad(acc.status) + '</td>' + '<td>' + esc(acc.mode) + ' · ' + esc(tz) + '</td>' +
+    '<td>' + bad(acc.status) + '</td>' +
+    '<td>' + authBadge + '</td>' +
+    '<td class="text-slate-500 text-[11px]">' + esc(acc.fingerprint_label || '') + '</td>' +
+    '<td>' + esc(acc.mode) + ' · ' + esc(tz) + '</td>' +
     '<td class="text-slate-500">' + esc(acc.weekly_active_days || '-') + '天/周 ' + (acc.rest_until ? ('休至' + acc.rest_until) : '') + '</td>' +
     '<td class="text-slate-500">' + fmtDT(acc.last_action_at) + '</td>' +
-    '<td class="whitespace-nowrap">' + actBtn +
+    '<td class="whitespace-nowrap">' + actBtn + fpBtn +
     '<button class="btn btn-danger ml-1" data-action="del-acc" data-id="' + acc.id + '">删</button></td>';
 }
 
@@ -229,17 +243,18 @@ function renderAccounts() {
     var rows = '';
     for (var i = 0; i < accs.length; i++) rows += '<tr><td>' + (i + 1) + '</td>' + accHtml(accs[i]) + '</tr>';
     var html = panel('被守护账号（' + accs.length + '）',
-      '<table><thead><tr><th>#</th><th>账号 / note_repo</th><th>状态</th><th>模式·时区</th><th>活跃度</th><th>最近动作</th><th>操作</th></tr></thead><tbody>' + rows + '</tbody></table>') +
-    panel('添加账号',
+      '<table><thead><tr><th>#</th><th>账号 / note_repo</th><th>状态</th><th>会话</th><th>指纹</th><th>模式·时区</th><th>活跃度</th><th>最近动作</th><th>操作</th></tr></thead><tbody>' + rows + '</tbody></table>') +
+    panel('添加账号（Web 会话通道，无需 GitHub Token）',
       '<div class="grid grid-cols-2 md:grid-cols-4 gap-3">' +
       '<div><label class="lbl">用户名</label><input id="nUser" class="inp" placeholder="GitHub 用户名" /></div>' +
-      '<div><label class="lbl">GitHub Token</label><input id="nTok" class="inp" type="password" placeholder="ghp_ 或 gho_ 开头" /></div>' +
+      '<div><label class="lbl">GitHub 登录密码 *</label><input id="nGhPass" class="inp" type="password" placeholder="用于静默自愈重登，AES-GCM 加密存储" /></div>' +
+      '<div><label class="lbl">GitHub 2FA 密钥(Base32,可空)</label><input id="nGhTotp" class="inp" placeholder="如 JBSWY3DPEHPK3PXP" /></div>' +
       '<div><label class="lbl">note_repo</label><input id="nRepo" class="inp" placeholder="owner/repo" /></div>' +
       '<div><label class="lbl">时区偏移</label><input id="nTz" class="inp" value="+08:00" /></div>' +
       '<div><label class="lbl">每周活跃天数</label><input id="nWky" class="inp" type="number" value="5" min="1" max="7" /></div>' +
       '<div><label class="lbl">休眠截止(可空)</label><input id="nRest" class="inp" type="date" /></div>' +
       '<div><label class="lbl">模式 rule/ai</label><input id="nMode" class="inp" value="rule" /></div>' +
-      '<div><label class="lbl">登录密码(可空)</label><input id="nPass" class="inp" type="password" /></div>' +
+      '<div><label class="lbl">控制台登录密码(可空)</label><input id="nPass" class="inp" type="password" /></div>' +
       '</div><button class="btn btn-primary mt-3" onclick="addAcc()">保存账号</button>');
     $('content').innerHTML = html;
   }).catch(function (e) { toast(e.message, '#fca5a5'); });
@@ -248,12 +263,27 @@ function renderAccounts() {
 function addAcc() {
   apiq('/api/accounts', {
     method: 'POST',
-    body: { username: $('nUser').value.trim(), github_token: $('nTok').value.trim(), note_repo: $('nRepo').value.trim(),
+    body: { username: $('nUser').value.trim(), gh_password: $('nGhPass').value, gh_totp: $('nGhTotp').value.trim(),
+      note_repo: $('nRepo').value.trim(),
       timezone: $('nTz').value.trim() || '+08:00', weekly_active_days: Number($('nWky').value || 5),
       rest_until: $('nRest').value || '', mode: $('nMode').value.trim(), password: $('nPass').value || '' }
   }).then(function () {
     toast('账号已添加，otpauth 仅第一次返回，请复制保存');
     location.reload();
+  }).catch(function (e) { toast(e.message, '#fca5a5'); });
+}
+function checkAcc(id) {
+  toast('正在探测会话…', '#93c5fd');
+  apiq('/api/accounts/' + id + '/check', { method: 'POST' }).then(function (j) {
+    toast(j.detail || j.state, j.state === 'valid' ? '#86efac' : '#fca5a5');
+    renderAccounts();
+  }).catch(function (e) { toast(e.message, '#fca5a5'); });
+}
+function reauthAcc(id) {
+  toast('正在重新认证（完整 Web 登录）…', '#93c5fd');
+  apiq('/api/accounts/' + id + '/reauth', { method: 'POST' }).then(function (j) {
+    toast(j.detail || j.state, j.state === 'valid' ? '#86efac' : '#fca5a5');
+    renderAccounts();
   }).catch(function (e) { toast(e.message, '#fca5a5'); });
 }
 function setStatus(id, st) {
@@ -439,6 +469,8 @@ document.addEventListener('click', function (e) {
   var act = el.getAttribute('data-action'), id = el.getAttribute('data-id'), val = el.getAttribute('data-val');
   if (act === 'set-status') setStatus(id, val);
   else if (act === 'del-acc') delAcc(id);
+  else if (act === 'check-acc') checkAcc(id);
+  else if (act === 'reauth-acc') reauthAcc(id);
   else if (act === 'cancel-cmp') cancelCampaign(id);
   else if (act === 'run-q') runQueue(id);
   else if (act === 'run-all') runAllNow();

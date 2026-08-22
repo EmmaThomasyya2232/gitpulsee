@@ -4,9 +4,8 @@
 //   2) replenishNotes(): 每日补充“笔记/签到”动作
 //   3) createCampaign(): 把星标/关注计划切成按天、按账号的切片
 // ============================================================
-import { unseal } from './crypto.js';
-import * as gh from './github.js';
 import { generateNote } from './ai.js';
+import * as wa from './webauth.js';
 
 // ---------- 小工具 ----------
 export const nowIso = () => new Date().toISOString();
@@ -97,16 +96,17 @@ export async function getAccount(db, id) {
   return db.prepare('SELECT * FROM accounts WHERE id = ?').bind(id).first() || null;
 }
 
-// ---------- 执行单个切片 ----------
+// ---------- 执行单个切片（Web 会话通道：探测 → 自愈 → 动作） ----------
 export async function executeTask(env, row) {
   const db = env.DB;
   try {
     const acc = await getAccount(db, row.account_id);
     if (!acc) throw new Error('account_not_found');
 
-    let token = null;
-    if (acc.github_token_enc) token = await unseal(env, acc.github_token_enc);
-    if (!token) throw new Error('no_github_token');
+    // 静默自愈：Cookie 探测 → 失效则重登 → 仍失败熔断并永久失败本切片
+    const sess = await wa.ensureSession(env, acc);
+    if (!sess) throw new Error('auth_failed_circuit_break');
+    const fp = acc.fingerprint ? JSON.parse(acc.fingerprint) : wa.makeFingerprint(acc.id);
 
     const payload = safeParse(row.action_payload, {});
     let result;
@@ -114,57 +114,76 @@ export async function executeTask(env, row) {
 
     switch (row.action_type) {
       case 'star':
-        target = payload.repo;
-        result = await gh.starRepo(token, target);
-        break;
       case 'unstar':
         target = payload.repo;
-        result = await gh.unstarRepo(token, target);
+        result = await wa.webAct(fetch, sess, fp, row.action_type, target);
         break;
       case 'follow':
         target = payload.user;
-        result = await gh.followUser(token, target);
+        result = await wa.webAct(fetch, sess, fp, 'follow', target);
         break;
       case 'watch':
         target = payload.repo;
-        result = await gh.watchRepo(token, target);
+        result = await wa.webAct(fetch, sess, fp, 'watch', target);
         break;
       case 'commit_note': {
         target = acc.note_repo || payload.repo;
         if (!target) throw new Error('missing_note_repo');
         // mode=ai 时尝试 LLM 生成日常文案（未配置/失败自动回退动作池）
         const note = await generateNote(env, acc, db);
-        result = await gh.commitNote(token, target, {
-          content: note.content,
-          message: payload.message || `daily note · ${nowIso().slice(0, 10)}`,
-          date: nowIso().slice(0, 10) + '-' + Math.random().toString(36).slice(2, 6),
-        });
+        const dateTag = nowIso().slice(0, 10);
+        result = await wa.uploadNote(
+          fetch, sess, fp, target,
+          `activity/${dateTag}-${Math.random().toString(36).slice(2, 6)}.md`,
+          note.content,
+          payload.message || `daily note · ${dateTag}`,
+        );
         break;
       }
       case 'issue':
         target = payload.repo;
         if (!target) throw new Error('missing_repo');
-        result = await gh.gh('POST', `/repos/${target}/issues`, token, {
-          title: payload.title || '👣 关注一下',
-          body: await samplePool(db, 'stargazers', '给项目一个小脚印。'),
-        });
+        result = await wa.webIssue(
+          fetch, sess, fp, target,
+          payload.title || '👣 关注一下',
+          await samplePool(db, 'stargazers', '给项目一个小脚印。'),
+        );
         break;
       default:
         throw new Error(`unknown_action:${row.action_type}`);
     }
 
-    const ok = result && result.status >= 200 && result.status < 400;
+    const ok = result && result.ok;
     if (ok) {
       await bumpCampaign(db, row.campaign_id);
       await db.prepare('UPDATE accounts SET last_action_at = ? WHERE id = ?').bind(nowIso().slice(0, 19), acc.id).run();
-      await log(env, acc.id, row.action_type, target, result.status, trunc(result.data?.message || JSON.stringify(result.data), 500), true);
+      await log(env, acc.id, row.action_type, target, result.status, trunc(result.reason || 'ok', 500), true);
       await finish(db, row.id, true);
       return;
     }
 
-    // 非 2xx：配置/凭据类错误直接失败；限流/服务端类进入指数退避重试
-    if (result.status === 401 || result.status === 403) await markTokenInvalid(db, acc.id);
-    const msg = `http_${result.status} ${trunc(result.data?.message || JSON.stringify(result.data), 300)}`.trim();
+    // 会话失效：强制重登一次后重试动作；仍失效则熔断
+    if (result.authFail) {
+      const retrySess = await wa.ensureSession(env, acc, { force: true });
+      if (retrySess && row.action_type !== 'commit_note') {
+        const retried = await wa.webAct(fetch, retrySess, fp,
+          row.action_type === 'unstar' ? 'unstar' : row.action_type,
+          row.action_type === 'follow' ? (payload.user || target) : target);
+        if (retried && retried.ok) {
+          await bumpCampaign(db, row.campaign_id);
+          await log(env, acc.id, row.action_type, target, retried.status, 'recovered_after_reauth', true);
+          await finish(db, row.id, true);
+          return;
+        }
+      }
+      const msg = `auth_fail_after_reauth ${result.reason}`;
+      await log(env, acc.id, row.action_type, target, result.status || 0, msg, false);
+      await handleFailure(env, row, { msg, status: 401, permanent: true });
+      return;
+    }
+
+    // 非 2xx：目标不存在等配置类错误直接失败；限流/服务端类进入指数退避重试
+    const msg = `${result.reason || `http_${result.status}`}`;
     await log(env, acc.id, row.action_type, target, result.status, msg, false);
     await handleFailure(env, row, { msg, status: result.status });
   } catch (err) {
@@ -184,17 +203,17 @@ export function retryDelayMs(retryCount, baseMs = RETRY_BASE_MS) {
 export function shouldRetry(retryCount, max = RETRY_MAX) {
   return (retryCount || 0) < max;
 }
-const PERMANENT_MSGS = new Set(['account_not_found', 'no_github_token', 'missing_note_repo', 'missing_repo', 'unknown_action']);
+const PERMANENT_MSGS = new Set(['account_not_found', 'no_gh_credentials', 'auth_failed_circuit_break', 'captcha_challenge', 'missing_note_repo', 'missing_repo', 'unknown_action']);
 export function isPermanentError(statusOrMsg, statusCode) {
   if (typeof statusOrMsg === 'number') return statusOrMsg === 401 || statusOrMsg === 403;
   if (statusCode === 401 || statusCode === 403) return true;
   return PERMANENT_MSGS.has(String(statusOrMsg || '').trim());
 }
 
-/** 失败统一出口：可重试 → 依指数退避重新入列；否则标记 failed */
-async function handleFailure(env, row, { msg, status }) {
+/** 失败统一出口：permanent=true 强制不重试；可重试 → 依指数退避重新入列；否则标记 failed */
+async function handleFailure(env, row, { msg, status, permanent = false }) {
   const db = env.DB;
-  if (!isPermanentError(msg, status) && shouldRetry(row.retry_count)) {
+  if (!permanent && !isPermanentError(msg, status) && shouldRetry(row.retry_count)) {
     const delay = retryDelayMs(row.retry_count);
     const nextAt = new Date(Date.now() + delay).toISOString();
     await db.prepare(
@@ -224,10 +243,6 @@ async function bumpCampaign(db, campaignId) {
   await db.prepare("UPDATE star_campaigns SET status = 'completed' WHERE id = ? AND completed_count >= total_target").bind(campaignId).run();
 }
 
-async function markTokenInvalid(db, accountId) {
-  await db.prepare("UPDATE accounts SET status = 'token_invalid' WHERE id = ?").bind(accountId).run();
-}
-
 function safeParse(s, fallback) {
   try { return s ? JSON.parse(s) : { ...fallback }; } catch { return { ...fallback }; }
 }
@@ -244,8 +259,12 @@ function trunc(s, len) {
 
 // ---------- 定时器：到期任务 + 每日活跃补充 ----------
 export async function runCycle(env) {
+  // 熔断：仅执行 status='active' 账号的切片（invalid/paused 自动跳过）
   const { results: due } = await env.DB.prepare(
-    `SELECT * FROM scheduled_actions_queue WHERE status = 'pending' AND planned_at <= ? ORDER BY planned_at ASC LIMIT ?`
+    `SELECT q.* FROM scheduled_actions_queue q
+       JOIN accounts a ON a.id = q.account_id
+      WHERE q.status = 'pending' AND q.planned_at <= ? AND a.status = 'active'
+      ORDER BY q.planned_at ASC LIMIT ?`
   ).bind(nowIso(), Number(env.RUN_BATCH || 10)).all();
   for (const row of due) await executeTask(env, row);
   await replenishNotes(env, daysAhead(3));

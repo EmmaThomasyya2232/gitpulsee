@@ -37,19 +37,20 @@
 | 能力 | 说明 | 状态 |
 |---|---|---|
 | 原生 TOTP 算号引擎 | 纯 Web Crypto API（`crypto.subtle`）实现 RFC 6238（HMAC-SHA1，±1 窗口），零 npm 构建依赖 | ✅ 已实现 |
-| 加密凭据托管 | GitHub Token / TOTP 种子 AES-GCM；登录口令 PBKDF2-200k | ✅ 已实现 |
+| 加密凭据托管 | GitHub 登录密码 / 2FA 种子 / TOTP 种子 AES-GCM；控制台口令 PBKDF2-25k（免费版 CPU 安全线） | ✅ 已实现 |
+| Web 会话自愈层 | 固化指纹（UA/Client Hints）+ CookieJar 持久化 + 探测(200/302) → 静默重登 → 失败熔断 | ✅ 已实现 |
 | 会话管理 | HMAC-SHA256 签名 Cookie，HttpOnly + SameSite=Lax，30 天免登录 | ✅ 已实现 |
 | 去规律化作息引擎 | 活跃日 = 账号 × 日期确定性伪随机，周活跃天数可配；夜间避让、时区窗口 | ✅ 已实现 |
 | 平滑关注计划 | `star_campaigns` → 切片 `scheduled_actions_queue`，动作类型轮转 | ✅ 已实现 |
 | 泊松式时间离散 | 指数间隔（expRand）+ 轮盘选天 + 同账号×天分钟去重，窗口 09:00–23:00 | ✅ 已实现 |
-| 日常学习动态同步 | 活跃日向 `note_repo/activity/日期.md` 提交 Markdown 笔记 | ✅ 已实现（REST API 通道） |
-| 暗黑风控制台 | 身份矩阵 / 计划看板 / 任务队列 / 对象池 / 审计日志 | ✅ 已实现 |
-| 幂等可重入 | star/follow/watch 天然幂等；commit_note 用文件 sha 做 upsert | ✅ 已实现 |
-| 失败重试与指数退避 | 429/5xx/网络异常按 5min·2^n 退避重排，401/403 与配置错误直接熔断 | ✅ 已实现 |
+| 日常学习动态同步 | 活跃日向 `note_repo/activity/日期.md` 提交 Markdown 笔记 | ✅ 已实现（Web 上传通道） |
+| 暗黑风控制台 | 身份矩阵 / 会话状态 / 计划看板 / 任务队列 / 对象池 / 审计日志 | ✅ 已实现 |
+| 幂等可重入 | star/follow/watch 天然幂等；commit_note 按日期路径写入 | ✅ 已实现 |
+| 失败重试与指数退避 | 429/5xx/网络异常按 5min·2^n 退避重排，鉴权失败与配置错误直接熔断 | ✅ 已实现 |
 | 管理员操作审计 | 登录成功/失败、账号增删改、计划创建取消等敏感操作留痕（用户 / IP / 详情） | ✅ 已实现 |
 | mode=ai 文案生成 | OpenAI 兼容接口按账号人设生成日常笔记；未配置/失败自动回退动作池 | ✅ 已实现 |
-| 一号一固化指纹 | UA / Sec-CH-UA 等环境隔离（需配套浏览器/代理） | 🚧 路线图 |
-| Web 会话协议自愈 | `redirect:'manual'` 捕获并合并 `Set-Cookie`，复用 `user_session` | 🚧 路线图 |
+| 一号一固化指纹 | 账号 id 确定性生成 UA / Sec-CH-UA / 语言，全生命周期不变，入库固化 | ✅ 已实现 |
+| Web 会话协议自愈 | 探测(200→执行/302→重登) → TOTP 算号 → user_session 加密回写 → 失败熔断暂停队列 | ✅ 已实现 |
 | 伴随式浏览（browse-before-star） | 面向"先浏览再关注"的自然化动作编排 | 🚧 路线图 |
 
 > ⚠️ 标注 🚧 的能力涉及**目标站点风控对抗**，任何使用都必须限定在
@@ -91,17 +92,19 @@ gitpulse/                         # 工程即 GitPulse
 ├── wrangler.toml                # Worker + D1(DB) + Cron(*/30) + nodejs_compat
 ├── migrations/0001_init.sql    # D1 建表 + 种子文案
 │   ├── 0002_add_retry.sql    # 队列重试计数（指数退避）
-│   └── 0003_admin_audit.sql  # 管理员操作审计表
+│   ├── 0003_admin_audit.sql  # 管理员操作审计表
+│   └── 0004_webauth.sql      # Web 会话层：gh_password_enc / gh_totp_enc / auth_state / last_probe_at
 ├── src/
 │   ├── index.js                # 路由入口 + API + scheduled 调度器
 │   ├── crypto.js               # AES-GCM / PBKDF2-200k / HMAC-SHA256 / base64url
 │   ├── totp.js                 # 纯 Web Crypto RFC 6238 算号实现
 │   ├── auth.js                 # HMAC 签名会话 Cookie（payload.sig）
 │   ├── github.js               # GitHub REST 动作客户端（star/follow/watch/commit）
+│   ├── webauth.js              # Web 会话层：固化指纹 / CookieJar / 静默自愈 / Web 动作
 │   ├── orchestrator.js         # 作息 + 切片 + 执行核心
 │   └── console.js              # 内嵌暗黑风 Tailwind 控制台
 ├── scripts/
-│   ├── selftest.mjs            # 本地自测（32 项）
+│   ├── selftest.mjs            # 本地自测（42 项）
 │   └── check_html.mjs          # 控制台内嵌 JS 语法校验
 ├── docs/项目计划.md            # 项目计划文档
 ├── CHANGELOG.md                 # 更新日志（Keep a Changelog 格式）
@@ -201,13 +204,13 @@ npx wrangler deploy
 - [x] 去规律化作息 + 账号×天 切片 + 时区与休假
 - [x] note_repo 日常学习动态同步
 - [x] TOTP 双因素 + HMAC 会话 + AES-GCM 凭据
-- [x] 控制台（总览 / 账号 / 计划 / 队列 / 对象池 / 审计）+ 本地自测 32/32
+- [x] 控制台（总览 / 账号 / 计划 / 队列 / 对象池 / 审计）+ 本地自测 42/42
 - [ ] 真实部署冒烟（d1 → deploy → 注册账号）
 - [x] 泊松式时间离散 + 自然化节奏（指数间隔 + 账号×天去重 + 轮盘选天）
 - [x] 失败重试与指数退避（5min·2^n，最多 3 次，401/403/配置错误直接熔断）
 - [x] 管理员操作审计（登录成功/失败留痕 + 敏感写操作审计视图，含来源 IP）
 - [x] mode=ai 文案生成（LLM 按人设生成，未配置/失败自动回退动作池）
-- [ ] 指纹 / Web 会话自愈层（cookie_jar / login_flow / fingerprint）与伴随式浏览
+- [x] Web 会话自愈层：固化指纹 + CookieJar 持久化 + 探测/静默重登/熔断（PAT 通道已全面下线）
 - [ ] 多管理员协作 / RBAC
 
 ---
