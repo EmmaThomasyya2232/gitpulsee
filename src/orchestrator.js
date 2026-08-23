@@ -308,13 +308,18 @@ export async function createCampaign(db, input, allAccounts) {
   // 兼容「填了目标用户名 + 仓库名」或「target_repo 已带 owner/」两种写法；
   // 只填裸仓库名时一律视为目标用户名缺失 → 明确报错，不做任何猜测式自动补前缀，
   // 避免把目标错误归属到当前账号命名空间导致 404（如 gitpulsee 实属其他用户）。
-  const parts = targetRepo.split('/');
+  const targetRepoTrim = targetRepo.replace(/\/+$/, '');
+  const parts = targetRepoTrim.split('/');
   let owner = parts[0] || '';
-  let repoName = parts.length >= 2 && parts[0] ? targetRepo : '';
-  if (parts.length === 1 && parts[0] && targetUser) { owner = targetUser; repoName = parts[0]; } // 显式目标用户补全
-  const normalizedRepo = repoName ? `${owner}/${repoName}` : targetRepo.split('/')[1] ? `${parts[0]}/${parts.slice(1).join('/')}` : '';
+  // 多于两段（如 a/b/c）一律视为非法目标格式，直接拒绝而非截取前两段
+  let repoName = parts.length === 2 ? parts[1] : '';
+  // 显式目标用户补全：填了 target_user 且 target_repo 只有裸仓库名
+  if (parts.length === 1 && parts[0] && targetUser) { owner = targetUser; repoName = parts[0]; }
+  // 只有恰好两段（owner/repo）才算完整；裸仓库名 + target_user 补全后也算两段
+  const partsFinal = repoName ? `${owner}/${repoName}`.split('/') : [];
+  const normalizedRepo = repoName && owner && partsFinal.length === 2 ? `${owner}/${repoName}` : '';
   const actionTypes = String(input.action_mix || 'star,follow,watch').split(',').map((s) => s.trim()).filter(Boolean);
-  if (!/^[A-Za-z0-9-]+\/[^/]+$/.test(normalizedRepo)) {
+  if (!/^[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+$/.test(normalizedRepo)) {
     throw new Error('target_repo 格式错误：必须填写完整 owner/repo（例如 EmmaThomasyya2232/gitpulsee），单一仓库名无法确定归属');
   }
   const total = Math.max(1, Number(input.total_target || 50));
