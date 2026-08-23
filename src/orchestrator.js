@@ -121,6 +121,9 @@ export async function executeTask(env, row) {
     }
 
     const payload = safeParse(row.action_payload, {});
+    // 兼容旧载荷：裸仓库名自动补账号登录名前缀（GitHub REST 要求 owner/repo）
+    const fullRepo = (r) => (r && !r.includes('/') ? `${acc.gh_login || acc.username}/${r}` : r);
+    if (payload.repo) payload.repo = fullRepo(payload.repo);
     let result;
     let target = payload.repo || payload.user || acc.note_repo || '';
 
@@ -298,12 +301,18 @@ export async function replenishNotes(env, dateStrs) {
 
 // ---------- 星计划：切片生成 ----------
 export async function createCampaign(db, input, allAccounts) {
-  const targetRepo = String(input.target_repo || '').trim();
+  const targetRepo = String(input.target_repo || '').trim().replace(/^https?:\/\/github\.com\//i, '').replace(/\.git$/i, '');
   const targetUser = String(input.target_user || '').trim();
+  // 归一化：只填仓库名时自动补当前用户前缀（GitHub REST 要求 owner/repo 全名）
+  let owner = targetRepo.split('/')[0] || '';
+  let repoName = targetRepo.split('/')[1] || '';
+  if (!repoName && targetUser) { owner = targetUser; repoName = owner === targetRepo ? '' : targetRepo; }
+  if (!repoName) { owner = String(input.gh_login || input.username || ''); repoName = targetRepo; }
+  const normalizedRepo = repoName ? `${owner}/${repoName}` : '';
+  const actionTypes = String(input.action_mix || 'star,follow,watch').split(',').map((s) => s.trim()).filter(Boolean);
+  if (!normalizedRepo || !normalizedRepo.includes('/')) throw new Error('target_repo 必填，格式 owner/repo（或填目标用户名让系统补全）');
   const total = Math.max(1, Number(input.total_target || 50));
   const days = Math.max(1, Math.min(90, Number(input.duration_days || 7)));
-  const actionTypes = String(input.action_mix || 'star,follow,watch').split(',').map((s) => s.trim()).filter(Boolean);
-  if (!targetRepo) throw new Error('target_repo 必填，格式 owner/repo');
 
   let pool = allAccounts.filter((a) => a.status === 'active');
   if (input.account_ids && input.account_ids.length) {
@@ -331,7 +340,7 @@ export async function createCampaign(db, input, allAccounts) {
 
   const cid = crypto.randomUUID();
   await db.prepare('INSERT INTO star_campaigns (id, target_repo, target_user, total_target, duration_days, action_mix, account_ids) VALUES (?,?,?,?,?,?,?)')
-    .bind(cid, targetRepo, targetUser || null, total, days, actionTypes.join(','), input.account_ids ? JSON.stringify(input.account_ids) : null).run();
+    .bind(cid, normalizedRepo, targetUser || null, total, days, actionTypes.join(','), input.account_ids ? JSON.stringify(input.account_ids) : null).run();
 
   let inserted = 0;
   const usedMin = new Map(); // `${accId}|${dayStr}` -> Set<分钟>
@@ -346,7 +355,7 @@ export async function createCampaign(db, input, allAccounts) {
     }
     const acc = dayBuckets.get(dayStr)[Math.floor(Math.random() * dayBuckets.get(dayStr).length)];
     const kind = actionTypes[i % actionTypes.length];
-    const payload = kind === 'follow' ? { user: targetUser } : { repo: targetRepo };
+    const payload = kind === 'follow' ? { user: targetUser } : { repo: normalizedRepo };
 
     // 同一账号同一天的时刻去重（去机械感）
     const key = acc.id + '|' + dayStr;
