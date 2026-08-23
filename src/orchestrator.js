@@ -121,9 +121,10 @@ export async function executeTask(env, row) {
     }
 
     const payload = safeParse(row.action_payload, {});
-    // 兼容旧载荷：裸仓库名自动补账号登录名前缀（GitHub REST 要求 owner/repo）
-    const fullRepo = (r) => (r && !r.includes('/') ? `${acc.gh_login || acc.username}/${r}` : r);
-    if (payload.repo) payload.repo = fullRepo(payload.repo);
+    // 旧载荷兜底：若 payload.repo 是裸仓库名且账号明确有登录名，则补前缀；
+    // 无登录名时保留原值交 REST（避免把目标猜错到他人命名空间）
+    const fullRepo = (r) => (r && !r.includes('/') && (acc.gh_login || acc.username) ? `${acc.gh_login || acc.username}/${r}` : r);
+    if (typeof payload.repo === 'string') payload.repo = fullRepo(payload.repo);
     let result;
     let target = payload.repo || payload.user || acc.note_repo || '';
 
@@ -303,14 +304,19 @@ export async function replenishNotes(env, dateStrs) {
 export async function createCampaign(db, input, allAccounts) {
   const targetRepo = String(input.target_repo || '').trim().replace(/^https?:\/\/github\.com\//i, '').replace(/\.git$/i, '');
   const targetUser = String(input.target_user || '').trim();
-  // 归一化：只填仓库名时自动补当前用户前缀（GitHub REST 要求 owner/repo 全名）
-  let owner = targetRepo.split('/')[0] || '';
-  let repoName = targetRepo.split('/')[1] || '';
-  if (!repoName && targetUser) { owner = targetUser; repoName = owner === targetRepo ? '' : targetRepo; }
-  if (!repoName) { owner = String(input.gh_login || input.username || ''); repoName = targetRepo; }
-  const normalizedRepo = repoName ? `${owner}/${repoName}` : '';
+  // 归一化：目标必须是 owner/repo 全名。
+  // 兼容「填了目标用户名 + 仓库名」或「target_repo 已带 owner/」两种写法；
+  // 只填裸仓库名时一律视为目标用户名缺失 → 明确报错，不做任何猜测式自动补前缀，
+  // 避免把目标错误归属到当前账号命名空间导致 404（如 gitpulsee 实属其他用户）。
+  const parts = targetRepo.split('/');
+  let owner = parts[0] || '';
+  let repoName = parts.length >= 2 && parts[0] ? targetRepo : '';
+  if (parts.length === 1 && parts[0] && targetUser) { owner = targetUser; repoName = parts[0]; } // 显式目标用户补全
+  const normalizedRepo = repoName ? `${owner}/${repoName}` : targetRepo.split('/')[1] ? `${parts[0]}/${parts.slice(1).join('/')}` : '';
   const actionTypes = String(input.action_mix || 'star,follow,watch').split(',').map((s) => s.trim()).filter(Boolean);
-  if (!normalizedRepo || !normalizedRepo.includes('/')) throw new Error('target_repo 必填，格式 owner/repo（或填目标用户名让系统补全）');
+  if (!/^[A-Za-z0-9-]+\/[^/]+$/.test(normalizedRepo)) {
+    throw new Error('target_repo 格式错误：必须填写完整 owner/repo（例如 EmmaThomasyya2232/gitpulsee），单一仓库名无法确定归属');
+  }
   const total = Math.max(1, Number(input.total_target || 50));
   const days = Math.max(1, Math.min(90, Number(input.duration_days || 7)));
 
