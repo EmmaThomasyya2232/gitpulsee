@@ -16,7 +16,7 @@ database_name = "gitpulse_db"
 # 一键部署（Deploy to Cloudflare 按钮）会自动创建数据库并把真实 id 写入下面字段；
 # 手动 CLI 部署时，请先运行 npx wrangler d1 create gitpulse_db，
 # 然后把返回的 id 替换下面的占位符：
-database_id = "REPLACE_WITH_DATABASE_ID"
+database_id = "24a02f42-4fbd-44da-aa12-fd1ee5a096f9"
 
 # 定时调度：每 30 分钟触发一次执行（处理到期任务、补充活跃计划）
 [triggers]

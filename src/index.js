@@ -7,6 +7,7 @@ import { seal, unseal, hashPassword, verifyPassword } from './crypto.js';
 import * as totp from './totp.js';
 import * as authM from './auth.js';
 import * as wa from './webauth.js';
+import * as gh from './github.js';
 import * as orc from './orchestrator.js';
 import * as audit from './audit.js';
 
@@ -60,7 +61,8 @@ async function setup(req, env) {
     `INSERT INTO accounts
       (id, username, password_hash, totp_secret_enc, github_token_enc, status, mode, timezone, weekly_active_days, note_repo)
      VALUES (?,?,?,?,?,'active','rule',?,?,?)`
-  ).bind(id, username, await hashPassword(password), await seal(env, tSecret), null,
+  ).bind(id, username, await hashPassword(password), await seal(env, tSecret),
+    body.github_token ? await seal(env, String(body.github_token).trim()) : null,
     body.timezone || '+08:00', Number(body.weekly_active_days || 5), body.note_repo || null).run();
   await audit.logAdmin(env.DB, { accountId: id, username, action: 'setup', detail: '初始化管理员', ip: audit.clientIp(req) });
   return json({
@@ -123,30 +125,33 @@ async function createAccount(req, env) {
   if (!username) return err('username 必填');
   const exists = await env.DB.prepare('SELECT id FROM accounts WHERE username = ? COLLATE NOCASE').bind(username).first();
   if (exists) return err('账号已存在');
-  // Web 会话通道：必须提供 GitHub 登录密码（2FA 可选但强烈建议）
-  if (!body.gh_password) return err('gh_password 必填（GitHub 登录密码，用于会话自愈）');
+  // Token 通道：必须提供 GitHub PAT（建议勾选 repo 与 user 权限）；账密转为可选备用凭据
+  if (!String(body.github_token || '').trim()) return err('github_token 必填（GitHub Personal Access Token）');
   const id = crypto.randomUUID();
   const tSecret = totp.randomSecret();          // 控制台登录用 TOTP
   const ghTotp = body.gh_totp ? String(body.gh_totp).trim().toUpperCase().replace(/\s/g, '') : null;
-  const fp = wa.makeFingerprint(id);            // 一号一固化指纹，全生命周期不变
-  const passwordHash = body.password ? await hashPassword(String(body.password)) : null;
+  const fp = wa.makeFingerprint(id);            // 一号一固化指纹（备用 Web 通道预留）
+  // 控制台登录密码可选；留空则自动生成随机口令（password_hash 列为 NOT NULL）
+  const passwordHash = await hashPassword(body.password ? String(body.password) : crypto.randomUUID());
   await env.DB.prepare(
     `INSERT INTO accounts
       (id, username, password_hash, totp_secret_enc, status, mode, ai_persona, note_repo, timezone, weekly_active_days, rest_until,
-       gh_login, gh_password_enc, gh_totp_enc, fingerprint, auth_state, cookie_jar)
-     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'{}')`
+       gh_login, gh_password_enc, gh_totp_enc, github_token_enc, fingerprint, auth_state, cookie_jar)
+     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'{}')`
   ).bind(
     id, username, passwordHash, await seal(env, tSecret),
     'active', body.mode || 'rule', body.ai_persona || null, body.note_repo || null,
     body.timezone || '+08:00', Number(body.weekly_active_days || 5), body.rest_until || null,
-    body.gh_login || username, await seal(env, String(body.gh_password)),
+    body.gh_login || username,
+    body.gh_password ? await seal(env, String(body.gh_password)) : null,
     ghTotp ? await seal(env, ghTotp) : null,
+    await seal(env, String(body.github_token).trim()),
     JSON.stringify(fp), 'unverified'
   ).run();
   return ok({
     id, username, fingerprint_label: fp.label,
     otpauth: totp.otpauthUrl(username, tSecret),
-    tip: 'otpauth 仅显示这一次，请立即保存；账号将在首次执行任务时自动完成 Web 登录并固化会话',
+    tip: 'otpauth 仅显示这一次，请立即保存；账号动作将通过 GitHub Token REST API 执行',
   });
 }
 
@@ -159,6 +164,11 @@ async function updateAccount(req, env, url) {
     if (['status', 'mode', 'ai_persona', 'note_repo', 'timezone', 'weekly_active_days', 'rest_until'].includes(k)) {
       fields.push(`${k} = ?`);
       vals.push(v);
+    }
+    if (k === 'github_token' && v) {
+      fields.push('github_token_enc = ?');
+      vals.push(await seal(env, String(v).trim()));
+      fields.push("auth_state = 'unverified'"); // 凭据变更 → 重新验证
     }
     if (k === 'gh_password' && v) {
       fields.push('gh_password_enc = ?');
@@ -176,22 +186,40 @@ async function updateAccount(req, env, url) {
   return ok({ updated: accountId });
 }
 
-/** 一键检测：Cookie 探测，失效自动走自愈重登 */
+/** Token 有效性探测（GET /api.github.com/user）：valid / invalid(token_invalid) / unknown */
+async function probeToken(env, acc) {
+  if (!acc.github_token_enc) return { state: 'invalid', detail: '未配置 GitHub Token，请在编辑中填入 PAT' };
+  let token;
+  try { token = await unseal(env, acc.github_token_enc); } catch { token = null; }
+  if (!token) return { state: 'invalid', detail: 'Token 解密失败（主密钥 MASTER_ENCRYPT_SECRET 是否变更过？）' };
+  const r = await gh.getMe(token);
+  const now = new Date().toISOString().slice(0, 19);
+  if (r.status === 200 && r.data && r.data.login) {
+    await env.DB.prepare("UPDATE accounts SET auth_state = 'valid', last_probe_at = ? WHERE id = ?").bind(now, acc.id).run();
+    return { state: 'valid', detail: `Token 有效（login: ${r.data.login}）` };
+  }
+  if (r.status === 401) {
+    await env.DB.prepare("UPDATE accounts SET auth_state = 'invalid', status = 'token_invalid', last_probe_at = ? WHERE id = ?").bind(now, acc.id).run();
+    return { state: 'invalid', detail: 'Token 已失效（401），账号已置为 token_invalid；请到 GitHub 重新生成 PAT 并更新' };
+  }
+  return {
+    state: 'unknown',
+    detail: `探测异常 HTTP ${r.status}${r.data && r.data.message ? '：' + r.data.message : ''}（可能是限流，稍后再试）`,
+  };
+}
+
+/** 一键检测：Token 探测 */
 async function checkAccount(req, env, url) {
   const id = url.pathname.split('/')[3];
   const acc = await env.DB.prepare('SELECT * FROM accounts WHERE id = ?').bind(id).first();
   if (!acc) return err('账号不存在', 404);
-  const sess = await wa.ensureSession(env, acc);
-  return ok({ state: sess ? 'valid' : 'invalid', detail: sess ? 'Cookie 有效' : '自愈失败，已熔断暂停' });
+  const p = await probeToken(env, acc);
+  return ok(p);
 }
 
-/** 强制重新认证：忽略现有 Cookie，直接走完整 Web 登录 */
+/** 重新验证：与检测同义（Token 无「重新登录」概念，保留按钮兼容） */
 async function reauthAccount(req, env, url) {
-  const id = url.pathname.split('/')[3];
-  const acc = await env.DB.prepare('SELECT * FROM accounts WHERE id = ?').bind(id).first();
-  if (!acc) return err('账号不存在', 404);
-  const sess = await wa.ensureSession(env, acc, { force: true });
-  return ok({ state: sess ? 'valid' : 'invalid', detail: sess ? '重新登录成功，会话已更新' : '重新认证失败，已熔断暂停' });
+  return checkAccount(req, env, url);
 }
 
 async function removeAccount(env, url) {

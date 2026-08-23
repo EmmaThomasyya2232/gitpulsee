@@ -97,7 +97,7 @@ ok('活跃天数约 5/7（误差 ±20%）', act >= 33 && act <= 50);
   ok('shouldRetry 边界（max=3: 0→重试, 3→放弃）', shouldRetry(0) && shouldRetry(2) && !shouldRetry(3));
   ok('isPermanentError: 401/403 永久失败', isPermanentError(401) && isPermanentError(403) && isPermanentError('x', 403));
   ok('isPermanentError: 可重试错误（429/500/网络异常）', !isPermanentError(429) && !isPermanentError(500) && !isPermanentError('network timeout'));
-  ok('isPermanentError: 配置类错误永久', isPermanentError('no_gh_credentials') && isPermanentError('auth_failed_circuit_break') && isPermanentError('unknown_action'));
+  ok('isPermanentError: 配置类错误永久', isPermanentError('no_github_token') && isPermanentError('auth_failed_circuit_break') && isPermanentError('unknown_action'));
 }
 
 // 11) 管理审计工具函数

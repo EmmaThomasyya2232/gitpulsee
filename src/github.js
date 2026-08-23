@@ -24,6 +24,11 @@ export const starRepo = (token, repo) => gh('PUT', `/user/starred/${encodeURICom
 export const unstarRepo = (token, repo) => gh('DELETE', `/user/starred/${encodeURIComponent(repo)}`, token);
 export const followUser = (token, user) => gh('PUT', `/user/following/${encodeURIComponent(user)}`, token);
 export const watchRepo = (token, repo) => gh('PUT', `/repos/${encodeURIComponent(repo)}/subscription`, token, { subscribed: true });
+/** Token 有效性探测：GET /user（200 → data.login 即账号身份） */
+export const getMe = (token) => gh('GET', '/user', token);
+/** REST 创建 issue */
+export const createIssue = (token, repo, title, bodyText) =>
+  gh('POST', `/repos/${encodeURIComponent(repo)}/issues`, token, { title: title || '', body: bodyText || '' });
 
 /**
  * 向 note_repo 写入一条“笔记/签到”提交（遍历 main → master）

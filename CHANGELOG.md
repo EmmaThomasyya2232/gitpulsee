@@ -4,6 +4,37 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [1.1.0] - 2026-08-23
+
+### 变更：执行通道全面切换为 GitHub Token REST API 🔄
+
+#### 背景
+- GitHub 对 github.com 网页端启用了 **DataDome 风控**：Workers 数据中心 IP 无法通过
+  「协议登录」（即使对齐 TLS/UA/Cookie，参考 curl_cffi 方案在服务器环境同样被拦截），
+  手动导入 Cookie 又存在**会话频繁失效**的运维问题。
+- REST API（`api.github.com` + PAT）不受 DataDome 影响，且 Token 长期有效、可随时吊销重发。
+
+#### 变更
+- **orchestrator.executeTask**：动作执行由「Web 会话探测→自愈→webAct」切换为
+  「解密 `github_token_enc` → REST 动作 → 401/403 熔断 token_invalid」；
+  commit_note 改走 `PUT /repos/{repo}/contents/{path}`。
+- **添加账号表单**：必填项由「GitHub 登录密码」改为「GitHub Token (PAT)」；
+  账密/2FA 转为可选备用字段（数据库列保留，备用 Web 通道未删除）。
+- **检测/重新验证接口**：改为 `GET /api.github.com/user` Token 探测，
+  返回具体中文原因（Token 有效 / 已失效 401 / 解密失败 / 限流）。
+- **移除「导入 Cookie」功能**及对应 `/api/accounts/:id/cookies` 接口与登录失败文案表。
+- **控制台徽章文案**：「Cookie有效」→「Token有效」，「需重新认证」→「Token失效」。
+
+#### 兼容性
+- 数据库无需迁移（`github_token_enc` 列 0001 已预留）。
+- 旧账号若未填 Token，执行时会被熔断为 token_invalid 并提示补充 PAT
+  （编辑账号填入 github_token 后自动恢复 unverified，检测通过即转 active）。
+
+#### PAT 权限建议
+- classic PAT：勾选 `repo` + `user`（follow 需要）。
+- fine-grained PAT：按仓库勾选 Contents(读写) / Issues(读写) / Starring(读写)，
+  账号权限勾选 Followers(读写)。
+
 ## [1.0.0] - 2026-08-22
 
 ### 首个正式版本 🎉

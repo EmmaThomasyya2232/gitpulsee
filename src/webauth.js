@@ -11,8 +11,8 @@ const GH = 'https://github.com';
 
 // ---------- 固化指纹：一号一指纹，全生命周期不变 ----------
 const FP_POOL = [
-  { v: '132', plat: 'Windows' }, { v: '131', plat: 'Windows' }, { v: '130', plat: 'macOS' },
-  { v: '129', plat: 'macOS' }, { v: '128', plat: 'Linux' }, { v: '133', plat: 'Windows' },
+  { v: '151', plat: 'Windows' }, { v: '150', plat: 'Windows' }, { v: '151', plat: 'macOS' },
+  { v: '149', plat: 'macOS' }, { v: '150', plat: 'Linux' }, { v: '152', plat: 'Windows' },
 ];
 const LANG_POOL = ['zh-CN,zh;q=0.9,en;q=0.6', 'en-US,en;q=0.9,zh-CN;q=0.8', 'zh-CN,zh;q=0.9', 'en;q=0.9'];
 
@@ -26,7 +26,7 @@ export function makeFingerprint(seed) {
   return {
     label: `chrome${p.v}-${p.plat.toLowerCase()}`,
     user_agent: `Mozilla/5.0 (${p.plat === 'Windows' ? 'Windows NT 10.0; Win64; x64' : p.plat === 'macOS' ? 'Macintosh; Intel Mac OS X 10_15_7' : 'X11; Linux x86_64'}) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${p.v}.0.0.0 Safari/537.36`,
-    sec_ch_ua: `"Chromium";v="${p.v}", "Google Chrome";v="${p.v}", "Not?A_Brand";v="99"`,
+    sec_ch_ua: `"Not=A?Brand";v="99", "Google Chrome";v="${p.v}", "Chromium";v="${p.v}"`,
     sec_ch_ua_platform: `"${p.plat}"`,
     sec_ch_ua_mobile: '?0',
     accept_language: lang,
@@ -66,6 +66,8 @@ export function parseJar(jsonText) {
   catch { return null; }
 }
 export const hasUserSession = (jar) => Boolean(jar && (jar.user_session || jar.__Host_user_session_same_site));
+/** 登录态判定（对齐成熟注册工具）：user_session / logged_in / dotcom_user 任一存在即视为已登录 */
+export const hasLoginCookie = (jar) => Boolean(jar && (jar.user_session || jar.__Host_user_session_same_site || jar.logged_in || jar.dotcom_user));
 
 // ---------- 统一请求封装（自动带指纹 + Cookie） ----------
 async function req(fetchImpl, url, { method = 'GET', jar, fp, form, headers = {} } = {}) {
@@ -96,6 +98,11 @@ export async function probeSession(acc, { jar = null, fetchImpl = fetch } = {}) 
   if (!j) return { alive: false, reason: 'no_cookie_jar' };
   const r = await req(fetchImpl, `${GH}/settings/profile`, { jar: j, fp });
   const finalUrl = r.url || '';
+  // 403 + DataDome 挑战页 → 明确标记风控拦截（而非笼统判失效）
+  if (r.status === 403) {
+    const t = await r.text().catch(() => '');
+    if (/captcha-delivery|datadome/i.test(t)) return { alive: false, status: 403, finalUrl, reason: 'datadome_challenge', jar: j };
+  }
   const alive = r.status === 200 && !/\/(login|session|sessions)/.test(finalUrl);
   return { alive, status: r.status, finalUrl, jar: j };
 }
@@ -138,7 +145,8 @@ export async function webLogin(env, acc, { fetchImpl = fetch } = {}) {
     }
 
     // 4) 判定结果并分类失败原因（供熔断与审计）
-    if (hasUserSession(jar)) return { ok: true, reason: 'logged_in', jar };
+    if (hasLoginCookie(jar)) return { ok: true, reason: 'logged_in', jar };
+    if (/captcha-delivery|datadome/i.test(body) || r.status === 403) return { ok: false, reason: 'datadome_challenge', jar };
     if (/captcha|challenge/i.test(body)) return { ok: false, reason: 'captcha_challenge', jar };
     if (/(incorrect|bad credentials|wrong)/i.test(body)) return { ok: false, reason: 'bad_credentials', jar };
     return { ok: false, reason: `unknown_http_${r.status}`, jar };
@@ -164,7 +172,7 @@ async function setState(db, id, patch) {
  *   自愈仍失败 → auth_state='invalid' + status='invalid'（熔断，队列自动跳过）。
  * 返回可用 Jar 或 null。
  */
-export async function ensureSession(env, acc, { force = false, fetchImpl = fetch } = {}) {
+export async function ensureSession(env, acc, { force = false, fetchImpl = fetch, out = null } = {}) {
   const db = env.DB;
   if (!force) {
     const p = await probeSession(acc, { fetchImpl });
@@ -184,6 +192,7 @@ export async function ensureSession(env, acc, { force = false, fetchImpl = fetch
     return res.jar;
   }
   // 自愈失败：熔断——暂停账号，后续队列任务全部跳过
+  if (out) out.reason = res.reason;
   await setState(db, acc.id, { auth_state: 'invalid' });
   await db.prepare("UPDATE accounts SET status = 'invalid' WHERE id = ?").bind(acc.id).run();
   return null;

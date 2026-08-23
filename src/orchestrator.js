@@ -5,7 +5,8 @@
 //   3) createCampaign(): 把星标/关注计划切成按天、按账号的切片
 // ============================================================
 import { generateNote } from './ai.js';
-import * as wa from './webauth.js';
+import * as ghApi from './github.js';
+import { unseal } from './crypto.js';
 
 // ---------- 小工具 ----------
 export const nowIso = () => new Date().toISOString();
@@ -96,17 +97,28 @@ export async function getAccount(db, id) {
   return db.prepare('SELECT * FROM accounts WHERE id = ?').bind(id).first() || null;
 }
 
-// ---------- 执行单个切片（Web 会话通道：探测 → 自愈 → 动作） ----------
+// ---------- 执行单个切片（Token REST 通道：解密 Token → REST 动作 → 401/403 熔断） ----------
+const accountToken = async (env, acc) => {
+  if (!acc.github_token_enc) return null;
+  try { return await unseal(env, acc.github_token_enc); } catch { return null; }
+};
+
+async function markTokenInvalid(db, id) {
+  await db.prepare("UPDATE accounts SET status = 'token_invalid', auth_state = 'invalid' WHERE id = ?").bind(id).run();
+}
+
 export async function executeTask(env, row) {
   const db = env.DB;
   try {
     const acc = await getAccount(db, row.account_id);
     if (!acc) throw new Error('account_not_found');
 
-    // 静默自愈：Cookie 探测 → 失效则重登 → 仍失败熔断并永久失败本切片
-    const sess = await wa.ensureSession(env, acc);
-    if (!sess) throw new Error('auth_failed_circuit_break');
-    const fp = acc.fingerprint ? JSON.parse(acc.fingerprint) : wa.makeFingerprint(acc.id);
+    // Token 通道：解密 PAT；缺失/解密失败直接熔断为 token_invalid
+    const token = await accountToken(env, acc);
+    if (!token) {
+      await markTokenInvalid(db, acc.id);
+      throw new Error('no_github_token');
+    }
 
     const payload = safeParse(row.action_payload, {});
     let result;
@@ -114,17 +126,20 @@ export async function executeTask(env, row) {
 
     switch (row.action_type) {
       case 'star':
+        target = payload.repo;
+        result = await ghApi.starRepo(token, target);
+        break;
       case 'unstar':
         target = payload.repo;
-        result = await wa.webAct(fetch, sess, fp, row.action_type, target);
+        result = await ghApi.unstarRepo(token, target);
         break;
       case 'follow':
         target = payload.user;
-        result = await wa.webAct(fetch, sess, fp, 'follow', target);
+        result = await ghApi.followUser(token, target);
         break;
       case 'watch':
         target = payload.repo;
-        result = await wa.webAct(fetch, sess, fp, 'watch', target);
+        result = await ghApi.watchRepo(token, target);
         break;
       case 'commit_note': {
         target = acc.note_repo || payload.repo;
@@ -132,19 +147,18 @@ export async function executeTask(env, row) {
         // mode=ai 时尝试 LLM 生成日常文案（未配置/失败自动回退动作池）
         const note = await generateNote(env, acc, db);
         const dateTag = nowIso().slice(0, 10);
-        result = await wa.uploadNote(
-          fetch, sess, fp, target,
-          `activity/${dateTag}-${Math.random().toString(36).slice(2, 6)}.md`,
-          note.content,
-          payload.message || `daily note · ${dateTag}`,
-        );
+        result = await ghApi.commitNote(token, target, {
+          content: note.content,
+          message: payload.message || `daily note · ${dateTag}`,
+          date: dateTag,
+        });
         break;
       }
       case 'issue':
         target = payload.repo;
         if (!target) throw new Error('missing_repo');
-        result = await wa.webIssue(
-          fetch, sess, fp, target,
+        result = await ghApi.createIssue(
+          token, target,
           payload.title || '👣 关注一下',
           await samplePool(db, 'stargazers', '给项目一个小脚印。'),
         );
@@ -153,39 +167,29 @@ export async function executeTask(env, row) {
         throw new Error(`unknown_action:${row.action_type}`);
     }
 
-    const ok = result && result.ok;
+    const ok = result && result.status >= 200 && result.status < 300;
     if (ok) {
       await bumpCampaign(db, row.campaign_id);
-      await db.prepare('UPDATE accounts SET last_action_at = ? WHERE id = ?').bind(nowIso().slice(0, 19), acc.id).run();
-      await log(env, acc.id, row.action_type, target, result.status, trunc(result.reason || 'ok', 500), true);
+      await db.prepare('UPDATE accounts SET last_action_at = ?, auth_state = ? WHERE id = ?')
+        .bind(nowIso().slice(0, 19), 'valid', acc.id).run();
+      await log(env, acc.id, row.action_type, target, result.status, trunc(result.data && result.data.message ? result.data.message : 'ok', 500), true);
       await finish(db, row.id, true);
       return;
     }
 
-    // 会话失效：强制重登一次后重试动作；仍失效则熔断
-    if (result.authFail) {
-      const retrySess = await wa.ensureSession(env, acc, { force: true });
-      if (retrySess && row.action_type !== 'commit_note') {
-        const retried = await wa.webAct(fetch, retrySess, fp,
-          row.action_type === 'unstar' ? 'unstar' : row.action_type,
-          row.action_type === 'follow' ? (payload.user || target) : target);
-        if (retried && retried.ok) {
-          await bumpCampaign(db, row.campaign_id);
-          await log(env, acc.id, row.action_type, target, retried.status, 'recovered_after_reauth', true);
-          await finish(db, row.id, true);
-          return;
-        }
-      }
-      const msg = `auth_fail_after_reauth ${result.reason}`;
-      await log(env, acc.id, row.action_type, target, result.status || 0, msg, false);
-      await handleFailure(env, row, { msg, status: 401, permanent: true });
+    // Token 失效/权限不足：熔断 token_invalid，本切片永久失败
+    if (result && (result.status === 401 || result.status === 403)) {
+      const msg = `token_auth_fail http_${result.status}`;
+      await log(env, acc.id, row.action_type, target, result.status, msg, false);
+      await markTokenInvalid(db, acc.id);
+      await handleFailure(env, row, { msg, status: result.status, permanent: true });
       return;
     }
 
     // 非 2xx：目标不存在等配置类错误直接失败；限流/服务端类进入指数退避重试
-    const msg = `${result.reason || `http_${result.status}`}`;
-    await log(env, acc.id, row.action_type, target, result.status, msg, false);
-    await handleFailure(env, row, { msg, status: result.status });
+    const msg = `${result && result.data && result.data.message ? result.data.message : `http_${result ? result.status : 0}`}`;
+    await log(env, acc.id, row.action_type, target, result ? result.status : 0, msg, false);
+    await handleFailure(env, row, { msg, status: result ? result.status : 0 });
   } catch (err) {
     const msg = String((err && err.message) || err).slice(0, 300);
     await log(env, row.account_id, row.action_type, '', 0, msg, false);
@@ -203,7 +207,7 @@ export function retryDelayMs(retryCount, baseMs = RETRY_BASE_MS) {
 export function shouldRetry(retryCount, max = RETRY_MAX) {
   return (retryCount || 0) < max;
 }
-const PERMANENT_MSGS = new Set(['account_not_found', 'no_gh_credentials', 'auth_failed_circuit_break', 'captcha_challenge', 'missing_note_repo', 'missing_repo', 'unknown_action']);
+const PERMANENT_MSGS = new Set(['account_not_found', 'no_github_token', 'auth_failed_circuit_break', 'missing_note_repo', 'missing_repo', 'unknown_action']);
 export function isPermanentError(statusOrMsg, statusCode) {
   if (typeof statusOrMsg === 'number') return statusOrMsg === 401 || statusOrMsg === 403;
   if (statusCode === 401 || statusCode === 403) return true;

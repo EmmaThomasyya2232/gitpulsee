@@ -37,7 +37,8 @@
 | 能力 | 说明 | 状态 |
 |---|---|---|
 | 原生 TOTP 算号引擎 | 纯 Web Crypto API（`crypto.subtle`）实现 RFC 6238（HMAC-SHA1，±1 窗口），零 npm 构建依赖 | ✅ 已实现 |
-| 加密凭据托管 | GitHub 登录密码 / 2FA 种子 / TOTP 种子 AES-GCM；控制台口令 PBKDF2-25k（免费版 CPU 安全线） | ✅ 已实现 |
+| 加密凭据托管 | GitHub Token / 登录密码 / 2FA 种子 / TOTP 种子 AES-GCM；控制台口令 PBKDF2-25k（免费版 CPU 安全线） | ✅ 已实现 |
+| Token REST 执行通道 | 全部动作走 `api.github.com`（PAT 鉴权），无 Cookie 失效问题；401/403 自动熔断 token_invalid | ✅ 已实现（v1.1 默认） |
 | Web 会话自愈层 | 固化指纹（UA/Client Hints）+ CookieJar 持久化 + 探测(200/302) → 静默重登 → 失败熔断 | ✅ 已实现 |
 | 会话管理 | HMAC-SHA256 签名 Cookie，HttpOnly + SameSite=Lax，30 天免登录 | ✅ 已实现 |
 | 去规律化作息引擎 | 活跃日 = 账号 × 日期确定性伪随机，周活跃天数可配；夜间避让、时区窗口 | ✅ 已实现 |
