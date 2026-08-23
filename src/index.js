@@ -6,7 +6,6 @@ import { consoleHTML } from './console.js';
 import { seal, unseal, hashPassword, verifyPassword } from './crypto.js';
 import * as totp from './totp.js';
 import * as authM from './auth.js';
-import * as wa from './webauth.js';
 import * as gh from './github.js';
 import * as orc from './orchestrator.js';
 import * as audit from './audit.js';
@@ -106,18 +105,12 @@ async function me(req, env, accountId) {
   return ok({ user: pub });
 }
 
-const A_cols = 'id,username,status,mode,ai_persona,note_repo,timezone,weekly_active_days,rest_until,last_action_at,created_at,gh_login,auth_state,last_probe_at,fingerprint';
+const A_cols = 'id,username,status,mode,ai_persona,note_repo,timezone,weekly_active_days,rest_until,last_action_at,created_at,gh_login,auth_state,last_probe_at';
 
 async function listAccounts(env) {
   const { results } = await env.DB.prepare(`SELECT ${A_cols} FROM accounts ORDER BY created_at`).all();
-  // 附带指纹短标签，便于控制台直接展示
-  const accounts = (results || []).map((a) => ({
-    ...a,
-    fingerprint_label: a.fingerprint ? (safeJson(a.fingerprint).label || '') : '',
-  }));
-  return ok({ accounts });
+  return ok({ accounts: results || [] });
 }
-function safeJson(s) { try { return JSON.parse(s) || {}; } catch { return {}; } }
 
 async function createAccount(req, env) {
   const body = await req.json().catch(() => ({}));
@@ -125,33 +118,29 @@ async function createAccount(req, env) {
   if (!username) return err('username 必填');
   const exists = await env.DB.prepare('SELECT id FROM accounts WHERE username = ? COLLATE NOCASE').bind(username).first();
   if (exists) return err('账号已存在');
-  // Token 通道：必须提供 GitHub PAT（建议勾选 repo 与 user 权限）；账密转为可选备用凭据
+  // Token 通道：必须提供 GitHub PAT（建议勾选 repo 与 user 权限）
   if (!String(body.github_token || '').trim()) return err('github_token 必填（GitHub Personal Access Token）');
   const id = crypto.randomUUID();
   const tSecret = totp.randomSecret();          // 控制台登录用 TOTP
-  const ghTotp = body.gh_totp ? String(body.gh_totp).trim().toUpperCase().replace(/\s/g, '') : null;
-  const fp = wa.makeFingerprint(id);            // 一号一固化指纹（备用 Web 通道预留）
   // 控制台登录密码可选；留空则自动生成随机口令（password_hash 列为 NOT NULL）
   const passwordHash = await hashPassword(body.password ? String(body.password) : crypto.randomUUID());
+  // gh_login 可选：作为账号的 GitHub 登录名备注，不再用于任何认证
+  const ghLogin = String(body.gh_login || body.username || '').trim();
   await env.DB.prepare(
     `INSERT INTO accounts
       (id, username, password_hash, totp_secret_enc, status, mode, ai_persona, note_repo, timezone, weekly_active_days, rest_until,
-       gh_login, gh_password_enc, gh_totp_enc, github_token_enc, fingerprint, auth_state, cookie_jar)
-     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'{}')`
+       gh_login, github_token_enc, auth_state)
+     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
   ).bind(
     id, username, passwordHash, await seal(env, tSecret),
     'active', body.mode || 'rule', body.ai_persona || null, body.note_repo || null,
     body.timezone || '+08:00', Number(body.weekly_active_days || 5), body.rest_until || null,
-    body.gh_login || username,
-    body.gh_password ? await seal(env, String(body.gh_password)) : null,
-    ghTotp ? await seal(env, ghTotp) : null,
-    await seal(env, String(body.github_token).trim()),
-    JSON.stringify(fp), 'unverified'
+    ghLogin, await seal(env, String(body.github_token).trim()), 'unverified'
   ).run();
   return ok({
-    id, username, fingerprint_label: fp.label,
+    id, username,
     otpauth: totp.otpauthUrl(username, tSecret),
-    tip: 'otpauth 仅显示这一次，请立即保存；账号动作将通过 GitHub Token REST API 执行',
+    tip: 'otpauth 仅显示这一次，请立即保存；账号动作将通过 GitHub Token REST API 执行，可在编辑中更新 PAT',
   });
 }
 
@@ -170,14 +159,9 @@ async function updateAccount(req, env, url) {
       vals.push(await seal(env, String(v).trim()));
       fields.push("auth_state = 'unverified'"); // 凭据变更 → 重新验证
     }
-    if (k === 'gh_password' && v) {
-      fields.push('gh_password_enc = ?');
-      vals.push(await seal(env, String(v)));
-      fields.push("auth_state = 'unverified'", "cookie_jar = '{}'"); // 凭据变更 → 旧会话作废
-    }
-    if (k === 'gh_totp' && v) {
-      fields.push('gh_totp_enc = ?');
-      vals.push(await seal(env, String(v).trim().toUpperCase().replace(/\s/g, '')));
+    if (k === 'gh_login' && v) {
+      fields.push('gh_login = ?');
+      vals.push(String(v));
     }
   }
   if (!fields.length) return err('没有可更新的字段');

@@ -26,7 +26,7 @@ jobs:
       - name: Syntax check (src)
         run: |
           set -e
-          for f in src/crypto.js src/totp.js src/auth.js src/audit.js src/ai.js src/webauth.js src/github.js src/orchestrator.js src/index.js src/console.js; do
+          for f in src/crypto.js src/totp.js src/auth.js src/audit.js src/ai.js src/github.js src/orchestrator.js src/index.js src/console.js; do
             node --check "$f"
           done
 

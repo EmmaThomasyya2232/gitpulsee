@@ -230,7 +230,6 @@ function accHtml(acc) {
   return '<td>' + esc(acc.username) + ' ' + (acc.note_repo ? ghLink(acc.note_repo) : '') + '</td>' +
     '<td>' + bad(acc.status) + '</td>' +
     '<td>' + authBadge + '</td>' +
-    '<td class="text-slate-500 text-[11px]">' + esc(acc.fingerprint_label || '') + '</td>' +
     '<td>' + esc(acc.mode) + ' · ' + esc(tz) + '</td>' +
     '<td class="text-slate-500">' + esc(acc.weekly_active_days || '-') + '天/周 ' + (acc.rest_until ? ('休至' + acc.rest_until) : '') + '</td>' +
     '<td class="text-slate-500">' + fmtDT(acc.last_action_at) + '</td>' +
@@ -244,7 +243,7 @@ function renderAccounts() {
     var rows = '';
     for (var i = 0; i < accs.length; i++) rows += '<tr><td>' + (i + 1) + '</td>' + accHtml(accs[i]) + '</tr>';
     var html = panel('被守护账号（' + accs.length + '）',
-      '<table><thead><tr><th>#</th><th>账号 / note_repo</th><th>状态</th><th>会话</th><th>指纹</th><th>模式·时区</th><th>活跃度</th><th>最近动作</th><th>操作</th></tr></thead><tbody>' + rows + '</tbody></table>') +
+      '<table><thead><tr><th>#</th><th>账号 / note_repo</th><th>状态</th><th>会话</th><th>模式·时区</th><th>活跃度</th><th>最近动作</th><th>操作</th></tr></thead><tbody>' + rows + '</tbody></table>') +
     panel('添加账号（GitHub Token 通道）',
       '<div class="grid grid-cols-2 md:grid-cols-4 gap-3">' +
       '<div><label class="lbl">用户名</label><input id="nUser" class="inp" placeholder="GitHub 用户名" /></div>' +
